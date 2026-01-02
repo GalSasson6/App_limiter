@@ -614,12 +614,6 @@ class FocusGuardianApp:
                     break_remaining = self._break_end_mono - now
                     self._break_remaining_sec = max(0.0, break_remaining)
 
-                    # --- REMINDER LOGIC ---
-                    if (now - self._last_break_reminder_mono) >= 60.0:
-                        trigger_break_reminder_sound()
-                        self._last_break_reminder_mono = now
-                    # ----------------------
-
                     if break_remaining <= 0:
                         # Break Finished -> Restart Focus
                         trigger_work_start_sound()
