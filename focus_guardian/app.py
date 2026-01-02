@@ -16,19 +16,17 @@ from .config import (
 )
 from .utils import ensure_dir, seconds_to_mmss
 from .logging_setup import setup_logger
-from .audio import ensure_tone_file, LoopingTone, trigger_timer_end_sound
-from .usage_store import UsageStore
-from .game_db import GameDB
-from .process_monitor import get_foreground_pid, safe_process_name, TargetMatcher
-from .tray import TrayController
-from .audio import ensure_tone_file, LoopingTone, trigger_timer_end_sound, trigger_work_start_sound
 from .audio import (
     ensure_tone_file,
     LoopingTone,
     trigger_timer_end_sound,
     trigger_work_start_sound,
-    trigger_break_reminder_sound
+    trigger_break_reminder_sound,
 )
+from .usage_store import UsageStore
+from .game_db import GameDB
+from .process_monitor import get_foreground_pid, safe_process_name, TargetMatcher
+from .tray import TrayController
 
 
 ctk.set_appearance_mode("Dark")
@@ -60,6 +58,7 @@ class FocusGuardianApp:
         self._break_paused = False  # NEW
         self._break_remaining_sec = 0.0  # NEW
         self._last_break_reminder_mono = 0.0  # NEW
+        self._last_pause_reminder_mono = 0.0
         # --- POMODORO VARIABLES ADDED HERE ---
         self._break_active = False
         self._break_end_mono = 0.0
@@ -251,13 +250,8 @@ class FocusGuardianApp:
             self.daily_limit_entry.insert(0, "60")
         if not self.strict_minutes_entry.get().strip():
             self.strict_minutes_entry.insert(0, "30")
-        if not self.strict_minutes_entry.get().strip():
-            self.strict_minutes_entry.insert(0, "30")
-
-            # --- ADD THIS ---
         if not self.break_minutes_entry.get().strip():
             self.break_minutes_entry.insert(0, "5")
-        # ----------------
 
         self.matcher.set_from_text(self.targets_entry.get())
         self._refresh_usage_box()
@@ -295,6 +289,10 @@ class FocusGuardianApp:
         self._planned_break_sec = break_mins * 60.0
         self._pomodoro_loop = self._pomodoro_var.get()
         self._break_active = False
+        self._break_paused = False
+        self._break_remaining_sec = 0.0
+        self._last_break_reminder_mono = 0.0
+        self._last_pause_reminder_mono = 0.0
         # -----------------
 
         self._strict_active = True
@@ -313,52 +311,54 @@ class FocusGuardianApp:
         self.logger.info(f"Strict timer started mins={mins}")
 
     def _update_pause_button_text(self) -> None:
-        def _update_pause_button_text(self) -> None:
-            def _do():
-                # === NEW: Handle Break Mode ===
-                if self._break_active:
-                    self.pause_btn.configure(state="normal")
-                    if self._break_paused:
-                        self.pause_btn.configure(text="Resume Break")
-                    else:
-                        self.pause_btn.configure(text="Pause Break")
-                    return
-                # ==============================
-
-                if not self._strict_active:
-                    self.pause_btn.configure(text=f"Pause strict timer (0/{STRICT_MAX_PAUSES})", state="disabled")
-                    return
-                state = "normal"
-                if self._strict_pause_count >= STRICT_MAX_PAUSES and not self._strict_paused:
-                    state = "disabled"
-                label = "Resume strict timer" if self._strict_paused else f"Pause strict timer ({self._strict_pause_count}/{STRICT_MAX_PAUSES})"
-                self.pause_btn.configure(text=label, state=state)
-            self.root.after(0, _do)
-
-    def toggle_pause_strict_timer(self) -> None:
-        def toggle_pause_strict_timer(self) -> None:
-            # === NEW: Handle Break Mode ===
+        def _do():
             if self._break_active:
+                self.pause_btn.configure(state="normal")
                 if self._break_paused:
-                    # Resume Break
-                    self._break_paused = False
-                    # Recalculate end time based on stored remaining seconds
-                    self._break_end_mono = time.monotonic() + self._break_remaining_sec
-                    self._update_pause_button_text()
-                    self.logger.info("Break resumed")
+                    self.pause_btn.configure(text="Resume Break")
                 else:
-                    # Pause Break
-                    self._break_paused = True
-                    now = time.monotonic()
-                    # Store remaining time
-                    self._break_remaining_sec = max(0.0, self._break_end_mono - now)
-                    self._update_pause_button_text()
-                    self.logger.info("Break paused")
+                    self.pause_btn.configure(text="Pause Break")
                 return
-            # ==============================
 
             if not self._strict_active:
+                self.pause_btn.configure(
+                    text=f"Pause strict timer (0/{STRICT_MAX_PAUSES})",
+                    state="disabled",
+                )
                 return
+
+            state = "normal"
+            if self._strict_pause_count >= STRICT_MAX_PAUSES and not self._strict_paused:
+                state = "disabled"
+            label = (
+                "Resume strict timer"
+                if self._strict_paused
+                else f"Pause strict timer ({self._strict_pause_count}/{STRICT_MAX_PAUSES})"
+            )
+            self.pause_btn.configure(text=label, state=state)
+
+        self.root.after(0, _do)
+
+    def toggle_pause_strict_timer(self) -> None:
+        if self._break_active:
+            if self._break_paused:
+                self._break_paused = False
+                self._break_end_mono = time.monotonic() + self._break_remaining_sec
+                self._last_break_reminder_mono = time.monotonic()
+                self._update_pause_button_text()
+                self.logger.info("Break resumed")
+            else:
+                self._break_paused = True
+                now = time.monotonic()
+                self._break_remaining_sec = max(0.0, self._break_end_mono - now)
+                self._last_break_reminder_mono = now
+                self._update_pause_button_text()
+                self.logger.info("Break paused")
+            return
+
+        if not self._strict_active:
+            return
+
         if self._strict_paused:
             self._strict_paused = False
             self._strict_end_mono = time.monotonic() + max(0.0, self._strict_remaining_sec)
@@ -375,6 +375,7 @@ class FocusGuardianApp:
         self._strict_remaining_sec = max(0.0, remaining)
         self._strict_paused = True
         self._strict_pause_count += 1
+        self._last_pause_reminder_mono = now
         self._update_pause_button_text()
 
         self.game.note_pause_used()
@@ -570,6 +571,9 @@ class FocusGuardianApp:
                 if self._strict_paused:
                     strict_remaining = max(0.0, self._strict_remaining_sec)
                     self.game.add_break(dt, reason="paused")
+                    if (now - self._last_pause_reminder_mono) >= 60.0:
+                        trigger_break_reminder_sound()
+                        self._last_pause_reminder_mono = now
                 else:
                     strict_remaining = self._strict_end_mono - now
                     if strict_remaining <= 0:
@@ -591,6 +595,7 @@ class FocusGuardianApp:
                             self._break_end_mono = now + self._planned_break_sec
                             self._break_remaining_sec = self._planned_break_sec
                             self._last_break_reminder_mono = now  # Reset reminder timer
+                            self._last_pause_reminder_mono = 0.0
                             self._update_pause_button_text()  # Update button to "Pause Break"
                             self.logger.info("Pomodoro: Focus done, starting break")
                         else:
@@ -602,8 +607,9 @@ class FocusGuardianApp:
                 # === BREAK SESSION ===
                 if self._break_paused:
                     # Do not countdown, use stored remaining time
-                    # Do not play reminders while paused
-                    pass
+                    if (now - self._last_break_reminder_mono) >= 60.0:
+                        trigger_break_reminder_sound()
+                        self._last_break_reminder_mono = now
                 else:
                     break_remaining = self._break_end_mono - now
                     self._break_remaining_sec = max(0.0, break_remaining)
