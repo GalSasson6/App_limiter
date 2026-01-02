@@ -58,6 +58,7 @@ class FocusGuardianApp:
         self._break_paused = False  # NEW
         self._break_remaining_sec = 0.0  # NEW
         self._last_break_reminder_mono = 0.0  # NEW
+        self._last_break_illegal_reminder_mono = 0.0
         self._last_pause_reminder_mono = 0.0
         # --- POMODORO VARIABLES ADDED HERE ---
         self._break_active = False
@@ -292,6 +293,7 @@ class FocusGuardianApp:
         self._break_paused = False
         self._break_remaining_sec = 0.0
         self._last_break_reminder_mono = 0.0
+        self._last_break_illegal_reminder_mono = 0.0
         self._last_pause_reminder_mono = 0.0
         # -----------------
 
@@ -595,6 +597,7 @@ class FocusGuardianApp:
                             self._break_end_mono = now + self._planned_break_sec
                             self._break_remaining_sec = self._planned_break_sec
                             self._last_break_reminder_mono = now  # Reset reminder timer
+                            self._last_break_illegal_reminder_mono = now
                             self._last_pause_reminder_mono = 0.0
                             self._update_pause_button_text()  # Update button to "Pause Break"
                             self.logger.info("Pomodoro: Focus done, starting break")
@@ -614,17 +617,12 @@ class FocusGuardianApp:
                     break_remaining = self._break_end_mono - now
                     self._break_remaining_sec = max(0.0, break_remaining)
 
-                    # --- REMINDER LOGIC ---
-                    if (now - self._last_break_reminder_mono) >= 60.0:
-                        trigger_break_reminder_sound()
-                        self._last_break_reminder_mono = now
-                    # ----------------------
-
                     if break_remaining <= 0:
                         # Break Finished -> Restart Focus
                         trigger_work_start_sound()
                         self._break_active = False
                         self._break_paused = False
+                        self._last_break_illegal_reminder_mono = 0.0
 
                         self._strict_active = True
                         self._strict_paused = False
@@ -663,6 +661,15 @@ class FocusGuardianApp:
                 active_proc = safe_process_name(active_pid)
                 match_key = self.matcher.match_key(active_proc)
                 illegal_focused = match_key is not None
+
+                if (
+                    self._break_active
+                    and (not self._break_paused)
+                    and illegal_focused
+                    and (now - self._last_break_illegal_reminder_mono) >= 30.0
+                ):
+                    trigger_break_reminder_sound()
+                    self._last_break_illegal_reminder_mono = now
 
                 if illegal_focused and dt > 0 and match_key:
                     self.store.add_seconds(match_key, dt)
