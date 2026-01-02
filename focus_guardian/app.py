@@ -189,8 +189,17 @@ class FocusGuardianApp:
         )
         self.pause_btn.grid(row=4, column=0, columnspan=2, padx=12, pady=(0, 10), sticky="ew")
 
+        self.stop_btn = ctk.CTkButton(
+            self.frame_strict,
+            text="Stop session",
+            fg_color="#7f8c8d",
+            hover_color="#95a5a6",
+            command=self.stop_strict_timer,
+        )
+        self.stop_btn.grid(row=5, column=0, columnspan=2, padx=12, pady=(0, 10), sticky="ew")
+
         self.strict_status = ctk.CTkLabel(self.frame_strict, text="Strict timer: inactive", text_color="gray")
-        self.strict_status.grid(row=5, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="w")
+        self.strict_status.grid(row=6, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="w")
         # -----------------------------
 
         self.frame_control = ctk.CTkFrame(self.root)
@@ -258,6 +267,7 @@ class FocusGuardianApp:
         self._refresh_usage_box()
         self._refresh_game_ui()
         self._update_pause_button_text()
+        self._update_stop_button_state()
 
     def _on_monitor_toggle(self) -> None:
         enabled = bool(self._monitor_enabled.get())
@@ -303,6 +313,7 @@ class FocusGuardianApp:
         self._strict_end_mono = time.monotonic() + total_sec
         self._strict_pause_count = 0
         self._update_pause_button_text()
+        self._update_stop_button_state()
 
         self.game.start_session(total_sec)
         # ... rest of function stays the same ...
@@ -340,6 +351,39 @@ class FocusGuardianApp:
             self.pause_btn.configure(text=label, state=state)
 
         self.root.after(0, _do)
+
+    def _update_stop_button_state(self) -> None:
+        def _do():
+            if self._strict_active or self._break_active:
+                self.stop_btn.configure(state="normal")
+            else:
+                self.stop_btn.configure(state="disabled")
+
+        self.root.after(0, _do)
+
+    def stop_strict_timer(self) -> None:
+        if not self._strict_active and not self._break_active:
+            return
+
+        self._strict_active = False
+        self._strict_paused = False
+        self._strict_remaining_sec = 0.0
+        self._strict_pause_count = 0
+        self._break_active = False
+        self._break_paused = False
+        self._break_remaining_sec = 0.0
+        self._last_break_reminder_mono = 0.0
+        self._last_break_illegal_reminder_mono = 0.0
+        self._last_pause_reminder_mono = 0.0
+
+        self.tone.stop()
+
+        if self.game.is_session_active():
+            self.game.end_session("stopped")
+
+        self._update_pause_button_text()
+        self._update_stop_button_state()
+        self.logger.info("Strict/break session stopped")
 
     def toggle_pause_strict_timer(self) -> None:
         if self._break_active:
@@ -615,7 +659,7 @@ class FocusGuardianApp:
                         self._last_break_reminder_mono = now
                 else:
                     break_remaining = self._break_end_mono - now
-                    self._break_remaining_sec = max(0.0, break_remaining)
+                self._break_remaining_sec = max(0.0, break_remaining)
 
                     if break_remaining <= 0:
                         # Break Finished -> Restart Focus
@@ -737,6 +781,7 @@ class FocusGuardianApp:
                 self._refresh_usage_box()
                 self._refresh_game_ui()
                 self._update_pause_button_text()
+                self._update_stop_button_state()
 
             if (now - self._last_save_mono) >= SAVE_EVERY_SEC:
                 self._last_save_mono = now
