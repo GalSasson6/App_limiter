@@ -21,6 +21,15 @@ from .usage_store import UsageStore
 from .game_db import GameDB
 from .process_monitor import get_foreground_pid, safe_process_name, TargetMatcher
 from .tray import TrayController
+from .audio import ensure_tone_file, LoopingTone, trigger_timer_end_sound, trigger_work_start_sound
+from .audio import (
+    ensure_tone_file,
+    LoopingTone,
+    trigger_timer_end_sound,
+    trigger_work_start_sound,
+    trigger_break_reminder_sound
+)
+
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -48,6 +57,16 @@ class FocusGuardianApp:
         self._strict_remaining_sec = 0.0
         self._strict_end_mono = 0.0
         self._strict_pause_count = 0
+        self._break_paused = False  # NEW
+        self._break_remaining_sec = 0.0  # NEW
+        self._last_break_reminder_mono = 0.0  # NEW
+        # --- POMODORO VARIABLES ADDED HERE ---
+        self._break_active = False
+        self._break_end_mono = 0.0
+        self._pomodoro_loop = False
+        self._planned_focus_sec = 0.0
+        self._planned_break_sec = 0.0
+        # -------------------------------------
 
         self._last_ui_update = 0.0
         self._last_save_mono = 0.0
@@ -72,7 +91,6 @@ class FocusGuardianApp:
 
         self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._monitor_thread.start()
-
     # UI
     def _build_ui(self) -> None:
         self.header = ctk.CTkLabel(self.root, text=APP_TITLE, font=("Roboto", 26, "bold"))
@@ -125,6 +143,7 @@ class FocusGuardianApp:
         self.daily_limit_entry.grid(row=0, column=1, sticky="e", padx=12, pady=12)
         self.frame_daily.grid_columnconfigure(0, weight=1)
 
+        # --- MODIFIED STRICT FRAME ---
         self.frame_strict = ctk.CTkFrame(self.root, fg_color="#3a2323")
         self.frame_strict.pack(padx=18, pady=8, fill="x")
 
@@ -133,6 +152,23 @@ class FocusGuardianApp:
         )
         self.strict_minutes_entry = ctk.CTkEntry(self.frame_strict, width=90, justify="center", placeholder_text="30")
         self.strict_minutes_entry.grid(row=0, column=1, sticky="e", padx=12, pady=(12, 6))
+
+        # NEW: Break minutes entry
+        ctk.CTkLabel(self.frame_strict, text="Break duration minutes:").grid(
+            row=1, column=0, sticky="w", padx=12, pady=(0, 6)
+        )
+        self.break_minutes_entry = ctk.CTkEntry(self.frame_strict, width=90, justify="center", placeholder_text="5")
+        self.break_minutes_entry.grid(row=1, column=1, sticky="e", padx=12, pady=(0, 6))
+
+        # NEW: Pomodoro auto-loop switch
+        self._pomodoro_var = ctk.BooleanVar(value=False)
+        self.pomodoro_switch = ctk.CTkSwitch(
+            self.frame_strict,
+            text="Auto-loop (Pomodoro)",
+            variable=self._pomodoro_var
+        )
+        self.pomodoro_switch.grid(row=2, column=0, columnspan=2, padx=12, pady=(0, 6), sticky="w")
+
         self.frame_strict.grid_columnconfigure(0, weight=1)
 
         self.strict_btn = ctk.CTkButton(
@@ -142,7 +178,7 @@ class FocusGuardianApp:
             hover_color="#e74c3c",
             command=self.start_strict_timer,
         )
-        self.strict_btn.grid(row=1, column=0, columnspan=2, padx=12, pady=(6, 8), sticky="ew")
+        self.strict_btn.grid(row=3, column=0, columnspan=2, padx=12, pady=(6, 8), sticky="ew")
 
         self.pause_btn = ctk.CTkButton(
             self.frame_strict,
@@ -151,10 +187,11 @@ class FocusGuardianApp:
             hover_color="#777777",
             command=self.toggle_pause_strict_timer,
         )
-        self.pause_btn.grid(row=2, column=0, columnspan=2, padx=12, pady=(0, 10), sticky="ew")
+        self.pause_btn.grid(row=4, column=0, columnspan=2, padx=12, pady=(0, 10), sticky="ew")
 
         self.strict_status = ctk.CTkLabel(self.frame_strict, text="Strict timer: inactive", text_color="gray")
-        self.strict_status.grid(row=3, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="w")
+        self.strict_status.grid(row=5, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="w")
+        # -----------------------------
 
         self.frame_control = ctk.CTkFrame(self.root)
         self.frame_control.pack(padx=18, pady=8, fill="x")
@@ -207,7 +244,6 @@ class FocusGuardianApp:
             text_color="gray",
         )
         self.footer.pack(pady=(0, 12))
-
     def _apply_defaults(self) -> None:
         if not self.targets_entry.get().strip():
             self.targets_entry.insert(0, "chrome.exe, discord.exe")
@@ -215,6 +251,13 @@ class FocusGuardianApp:
             self.daily_limit_entry.insert(0, "60")
         if not self.strict_minutes_entry.get().strip():
             self.strict_minutes_entry.insert(0, "30")
+        if not self.strict_minutes_entry.get().strip():
+            self.strict_minutes_entry.insert(0, "30")
+
+            # --- ADD THIS ---
+        if not self.break_minutes_entry.get().strip():
+            self.break_minutes_entry.insert(0, "5")
+        # ----------------
 
         self.matcher.set_from_text(self.targets_entry.get())
         self._refresh_usage_box()
@@ -239,12 +282,21 @@ class FocusGuardianApp:
     def start_strict_timer(self) -> None:
         try:
             mins = float(self.strict_minutes_entry.get().strip())
+            break_mins = float(self.break_minutes_entry.get().strip())  # NEW
             if mins <= 0:
                 return
         except Exception:
             return
 
         total_sec = mins * 60.0
+
+        # --- NEW SETUP ---
+        self._planned_focus_sec = total_sec
+        self._planned_break_sec = break_mins * 60.0
+        self._pomodoro_loop = self._pomodoro_var.get()
+        self._break_active = False
+        # -----------------
+
         self._strict_active = True
         self._strict_paused = False
         self._strict_remaining_sec = total_sec
@@ -253,7 +305,7 @@ class FocusGuardianApp:
         self._update_pause_button_text()
 
         self.game.start_session(total_sec)
-
+        # ... rest of function stays the same ...
         if not self._monitor_enabled.get():
             self._monitor_enabled.set(True)
             self._safe_ui_update_status_line(True)
@@ -261,21 +313,52 @@ class FocusGuardianApp:
         self.logger.info(f"Strict timer started mins={mins}")
 
     def _update_pause_button_text(self) -> None:
-        def _do():
-            if not self._strict_active:
-                self.pause_btn.configure(text=f"Pause strict timer (0/{STRICT_MAX_PAUSES})", state="disabled")
-                return
-            state = "normal"
-            if self._strict_pause_count >= STRICT_MAX_PAUSES and not self._strict_paused:
-                state = "disabled"
-            label = "Resume strict timer" if self._strict_paused else f"Pause strict timer ({self._strict_pause_count}/{STRICT_MAX_PAUSES})"
-            self.pause_btn.configure(text=label, state=state)
-        self.root.after(0, _do)
+        def _update_pause_button_text(self) -> None:
+            def _do():
+                # === NEW: Handle Break Mode ===
+                if self._break_active:
+                    self.pause_btn.configure(state="normal")
+                    if self._break_paused:
+                        self.pause_btn.configure(text="Resume Break")
+                    else:
+                        self.pause_btn.configure(text="Pause Break")
+                    return
+                # ==============================
+
+                if not self._strict_active:
+                    self.pause_btn.configure(text=f"Pause strict timer (0/{STRICT_MAX_PAUSES})", state="disabled")
+                    return
+                state = "normal"
+                if self._strict_pause_count >= STRICT_MAX_PAUSES and not self._strict_paused:
+                    state = "disabled"
+                label = "Resume strict timer" if self._strict_paused else f"Pause strict timer ({self._strict_pause_count}/{STRICT_MAX_PAUSES})"
+                self.pause_btn.configure(text=label, state=state)
+            self.root.after(0, _do)
 
     def toggle_pause_strict_timer(self) -> None:
-        if not self._strict_active:
-            return
+        def toggle_pause_strict_timer(self) -> None:
+            # === NEW: Handle Break Mode ===
+            if self._break_active:
+                if self._break_paused:
+                    # Resume Break
+                    self._break_paused = False
+                    # Recalculate end time based on stored remaining seconds
+                    self._break_end_mono = time.monotonic() + self._break_remaining_sec
+                    self._update_pause_button_text()
+                    self.logger.info("Break resumed")
+                else:
+                    # Pause Break
+                    self._break_paused = True
+                    now = time.monotonic()
+                    # Store remaining time
+                    self._break_remaining_sec = max(0.0, self._break_end_mono - now)
+                    self._update_pause_button_text()
+                    self.logger.info("Break paused")
+                return
+            # ==============================
 
+            if not self._strict_active:
+                return
         if self._strict_paused:
             self._strict_paused = False
             self._strict_end_mono = time.monotonic() + max(0.0, self._strict_remaining_sec)
@@ -468,6 +551,8 @@ class FocusGuardianApp:
             self.store.reset_if_new_day()
             self.game.reset_if_new_day()
 
+            # ... (targets text logic same as before) ...
+
             try:
                 targets_text = self.targets_entry.get()
             except Exception:
@@ -478,33 +563,90 @@ class FocusGuardianApp:
                 self.logger.info(f"Targets updated: {targets_text}")
 
             enabled = bool(self._monitor_enabled.get())
-
             strict_remaining = 0.0
+
             if self._strict_active:
+                # === FOCUS SESSION ===
                 if self._strict_paused:
                     strict_remaining = max(0.0, self._strict_remaining_sec)
                     self.game.add_break(dt, reason="paused")
                 else:
                     strict_remaining = self._strict_end_mono - now
                     if strict_remaining <= 0:
+                        # Focus Finished
                         self._strict_active = False
                         self._strict_paused = False
                         strict_remaining = 0.0
                         self._strict_pause_count = 0
                         self._update_pause_button_text()
+
                         trigger_timer_end_sound()
                         if self.game.is_session_active():
                             self.game.end_session("completed")
+
+                        if self._pomodoro_loop:
+                            # Start Break
+                            self._break_active = True
+                            self._break_paused = False
+                            self._break_end_mono = now + self._planned_break_sec
+                            self._break_remaining_sec = self._planned_break_sec
+                            self._last_break_reminder_mono = now  # Reset reminder timer
+                            self._update_pause_button_text()  # Update button to "Pause Break"
+                            self.logger.info("Pomodoro: Focus done, starting break")
+                        else:
+                            self._strict_remaining_sec = 0.0
                     else:
                         self._strict_remaining_sec = max(0.0, strict_remaining)
 
-            if not self._strict_active:
+            elif self._break_active:
+                # === BREAK SESSION ===
+                if self._break_paused:
+                    # Do not countdown, use stored remaining time
+                    # Do not play reminders while paused
+                    pass
+                else:
+                    break_remaining = self._break_end_mono - now
+                    self._break_remaining_sec = max(0.0, break_remaining)
+
+                    # --- REMINDER LOGIC ---
+                    if (now - self._last_break_reminder_mono) >= 60.0:
+                        trigger_break_reminder_sound()
+                        self._last_break_reminder_mono = now
+                    # ----------------------
+
+                    if break_remaining <= 0:
+                        # Break Finished -> Restart Focus
+                        trigger_work_start_sound()
+                        self._break_active = False
+                        self._break_paused = False
+
+                        self._strict_active = True
+                        self._strict_paused = False
+                        self._strict_remaining_sec = self._planned_focus_sec
+                        self._strict_end_mono = now + self._planned_focus_sec
+                        self._strict_pause_count = 0
+                        self._update_pause_button_text()
+
+                        self.game.start_session(self._planned_focus_sec)
+                        self.logger.info("Pomodoro: Break done, restarting focus")
+
+            # Update Status Text
+            if self._break_active:
+                if self._break_paused:
+                    strict_text = f"Pomodoro Break: PAUSED ({seconds_to_mmss(self._break_remaining_sec)} left)"
+                else:
+                    rem = max(0.0, self._break_remaining_sec)
+                    strict_text = f"Pomodoro Break: {seconds_to_mmss(rem)} left"
+            elif not self._strict_active:
                 strict_text = "Strict timer: inactive"
             else:
                 if self._strict_paused:
                     strict_text = f"Strict timer: paused ({seconds_to_mmss(strict_remaining)} left)"
                 else:
                     strict_text = f"Strict timer: active ({seconds_to_mmss(strict_remaining)} left)"
+
+            # ... (Rest of function for active_proc, match_key, limit_sec, etc. stays the same) ...
+            # Ensure you include the rest of the original _monitor_loop code below here
 
             active_proc = None
             match_key = None
@@ -568,6 +710,10 @@ class FocusGuardianApp:
             if (now - self._last_ui_update) >= UI_UPDATE_MIN_INTERVAL_SEC:
                 self._last_ui_update = now
                 status_color = "red" if should_punish else "#2ecc71"
+
+                if self._break_active:
+                    status_color = "#3498db"
+
                 self._set_labels(
                     active_proc=active_proc,
                     illegal_focused=illegal_focused,

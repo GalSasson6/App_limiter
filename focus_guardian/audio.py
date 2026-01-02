@@ -12,6 +12,65 @@ from .config import (
 )
 
 
+def trigger_break_reminder_sound() -> None:
+    def _play():
+        # Gentle double beep to remind of break status
+        notes = [660.0, 550.0]
+        duration_ms = 100
+        duration_sec = duration_ms / 1000.0
+        sample_rate = 44100
+        volume_base = 0.25  # Lower volume for background reminder
+
+        all_frames = bytearray()
+
+        for freq in notes:
+            n_samples = int(sample_rate * duration_sec)
+            max_amp = int(32767 * volume_base)
+
+            for i in range(n_samples):
+                t = i / sample_rate
+                envelope = 1.0
+                sample_val = int(max_amp * envelope * math.sin(2.0 * math.pi * freq * t))
+                all_frames += struct.pack("<h", sample_val)
+
+            # Short silence between beeps
+            silence = int(sample_rate * 0.1)
+            all_frames += b'\x00\x00' * silence
+
+        wav_data = _wrap_wav_header(all_frames, sample_rate)
+        winsound.PlaySound(wav_data, winsound.SND_MEMORY)
+
+    threading.Thread(target=_play, daemon=True).start()
+def trigger_work_start_sound() -> None:
+    def _play():
+        # Distinct "Back to Work" pattern: Low(440), Low(440), High(880)
+        notes = [440.0, 440.0, 880.0]
+        duration_ms = 120
+        duration_sec = duration_ms / 1000.0
+        sample_rate = 44100
+        volume_base = 0.5
+
+        all_frames = bytearray()
+
+        for freq in notes:
+            n_samples = int(sample_rate * duration_sec)
+            max_amp = int(32767 * volume_base)
+
+            # Add a tiny silence between notes for distinct beeps
+            for i in range(n_samples):
+                t = i / sample_rate
+                envelope = 1.0  # Constant volume for beeps
+                sample_val = int(max_amp * envelope * math.sin(2.0 * math.pi * freq * t))
+                all_frames += struct.pack("<h", sample_val)
+
+            # 50ms silence
+            silence_samples = int(sample_rate * 0.05)
+            all_frames += b'\x00\x00' * silence_samples
+
+        wav_data = _wrap_wav_header(all_frames, sample_rate)
+        winsound.PlaySound(wav_data, winsound.SND_MEMORY)
+
+    threading.Thread(target=_play, daemon=True).start()
 def _wrap_wav_header(pcm_data: bytes, sample_rate: int) -> bytes:
     data_size = len(pcm_data)
     riff_size = 36 + data_size
